@@ -1,0 +1,761 @@
+\documentclass{article}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\title{Call Center Data Analysis---Homework 5}
+\author{***}
+\date{12/7/2014}
+\maketitle
+
+\textbf{1. Data Description}\\
+\textbf{1.1 A brief introduction of the data}\\
+In each of the 12 months of 1999, about 100,000-120,000 calls arrived to the system, with 65,000-85,000 of these terminating in the VRU. The remaining 30,000-40,000 calls per month involved callers who exited the VRU indicating a desire to speak to an agent. These calls are the focus of our study.\\
+
+\textbf{1.2 Loading data into R from txt files}\\
+
+\textbf{Code:}
+<<loading data code>>=
+library(DAAG)
+library(survival)
+library(rpart)
+setwd("C:****")
+jan <- read.table("january.txt", header=T)
+feb <- read.table("february.txt", header=T)
+mar <- read.table("mars.txt", header=T)
+apr <- read.table("april.txt", header=T)
+may <- read.table("may.txt", header=T)
+jun <- read.table("june.txt", header=T)
+jul <- read.table("july.txt", header=T)
+aug <- read.table("august.txt", header=T)
+sep <- read.table("september.txt", header=T)
+oct <- read.table("october.txt", header=T)
+nov <- read.table("november.txt", header=T)
+dec <- read.table("december.txt", header=T)
+
+jan$mon = 1; feb$mon = 2; mar$mon = 3; apr$mon = 4; may$mon = 5;
+jun$mon = 6; jul$mon = 7; aug$mon = 8; sep$mon = 9; oct$mon = 10; 
+nov$mon = 11; dec$mon = 12
+
+year <- rbind(jan,feb,mar,apr,may,jun,jul,aug,sep,oct,nov,dec)
+@
+     
+\textbf{1.3 Creating variables indicating time intervals and weekdays}\\
+To do the following analysis, we need to create some new variables that indicate the data's time interval during a day and the data's weekday.\\
+
+\textbf{variable description}\\
+intervals\_per\_hour: divide an hour into 4 intervals.\\
+intervals\_total: the total intervals during a day.\\
+inter\_len: the length of an interval measured in seconds.\\
+num\_sec(): a function that will turn a time whose format is 'hh:mm:ss' into seconds.\\
+time\_vru\_en: the time that a call enters the vru.\\
+time\_vru\_ex: the time that a call exits the vru.\\
+time\_q\_start: the time that a call enters the queue.\\
+time\_q\_exit: the time that a call exits the queue.\\
+time\_ser\_start: the time that a service begins.\\
+time\_ser\_exit: the time that a service ends.\\
+vru\_enter\_v2: time\_vru\_en in forms of seconds\\
+q\_start\_v2: time\_q\_start in forms of seconds\\
+ser\_start\_v2: time\_ser\_start in forms of seconds\\
+vru\_enter\_int: time\_vru\_en in forms of time intervals\\
+q\_start\_int: time\_q\_start in forms of time intervals\\
+ser\_start\_int: time\_ser\_en in forms of time intervals\\
+
+<<date variable creation>>=
+intervals_per_hour = 2
+intervals_total = intervals_per_hour * 24
+inter_len = (60/intervals_per_hour) * 60
+
+num_sec <-function(x){
+     time <- unlist(strsplit(x, "[:]")) 
+     hrs <- as.numeric(time[1])
+     mins <- as.numeric(time[2])
+     secs <- as.numeric(time[3])
+     return (hrs * 3600 + mins * 60 + secs)
+}
+
+time_vru_en <- data.frame(as.character(year$vru_entry))
+time_vru_ex <- data.frame(as.character(year$vru_exit))
+time_q_start <- data.frame(as.character(year$q_start))
+time_q_exit <- data.frame(as.character(year$q_exit))
+time_ser_start <- data.frame(as.character(year$ser_start))
+time_ser_exit <- data.frame(as.character(year$ser_exit))
+
+year$vru_enter_v2 = apply(time_vru_en, 1, num_sec)
+year$q_start_v2 = apply(time_q_start, 1, num_sec)
+year$ser_start_v2 = apply(time_ser_start, 1, num_sec)
+year$vru_exit_v2 = apply(time_vru_ex, 1, num_sec)
+
+year$vru_enter_int = floor(year$vru_enter_v2 / inter_len) + 1
+year$vru_exit_int = floor(year$vru_exit_v2 / inter_len) + 1
+year$q_start_int = floor(year$q_start_v2 / inter_len) + 1
+year$ser_start_int = floor(year$ser_start_v2 / inter_len) + 1
+
+date = as.character(year$date)
+date = as.Date(date,format="%y%m%d")
+date = as.POSIXlt(date)
+
+year$weekday = date$wday
+year$weeknum = year$weekday
+year$weekday <- factor(year$weekday,
+                       labels=c('Sun','Mon','Tue','Wed','Thu','Fri','Sat'))
+@
+     
+\textbf{1.4 Cleaning data}\\
+
+There are many irregular data entries and we need to delete them before doing the analysis.\\
+
+<<cleanning data>>=
+year = year[which(year$outcome != "PHANTOM"),]
+year <- year[!(year$outcome == "HANG" & year$ser_time > 0),]
+@
+     
+\textbf{1.4 Subsets}\\
+
+Given the fact that we are now concerned with the arrivals that need agent service, we will use the subset of the data that entering a queue or get served directly after exiting the vru.\\
+
+<<Subsets>>=
+serv_data0 = year[which(year$q_start !='0:00:00'),]
+serv_data1 = serv_data0[which(serv_data0$vru_exit_int>=7*intervals_per_hour+1),]
+@
+     
+     
+\textbf{2. Arrival Process}\\
+
+The arrival process might be different for different types of customers and different types of service. And there are also major call types. We can see it from the following summary table.\\
+
+<<>>=
+table(serv_data1$type)
+table(serv_data1$priority)
+@
+     
+\textbf{2.1 The Arrival Process in Different Weekdays.}\\
+
+ 0  1  2  3  4 
+52 51 50 52 52 
+
+
+
+
+<<arrival calls for different weekdays>>=
+library(lattice)
+temp = serv_data1
+table1 = as.data.frame(table(temp$vru_exit_int, temp$weeknum))
+names(table1)=c("time",'weekday','freq')
+num_weeks = c(52,51,50,52,52)
+table1$avg.freq = numeric(dim(table1)[1])
+for(i in 1:dim(table1)[1]){
+     if(table1$weekday[i]==1){
+          table1$avg.freq = table1$freq/51
+     }else if(table1$weekday[i]==2){
+          table1$avg.freq =table1$freq/50
+     }else{
+          table1$avg.freq = table1$freq/52
+     }
+}
+
+weekday.xyplot = xyplot(avg.freq ~time|weekday, data=table1,
+               type="l",
+               ylab='Number of Calls per day',
+               xlab='Time intervals per day',
+               legend.plot=TRUE,outer=TRUE)
+xlabpos <- seq(from=1, by=4, length=18)
+xlabs <- seq(from =7, by = 1,length =18)
+update(weekday.xyplot, scales=list(x=list(at=xlabpos, 
+                                          labels=xlabs)))
+
+weekday.xyplot2 = xyplot(avg.freq ~time,groups=weekday, data=table1,
+               type="l",
+               ylab='Number of Calls per day',
+               xlab='Time intervals per day',
+               legend.plot=TRUE)
+update(weekday.xyplot2, scales=list(x=list(at=xlabpos, 
+                                          labels=xlabs)))
+@
+     
+   From the above figure, we can easily see that the arrival patterns from Sunday to Thursday are very similar to each other with bimodal pattern, while the arrival process in Friday and Saturday are very different. Thus, in the following analysis, we will only consider the data of weekdays(that is from Sunday to Thurday).
+
+<<extract the weekday data>>=
+temp = temp[which(temp$weekday %in% c('Sun','Mon','Tue','Wed',
+                                           'Thu')),]
+@
+     
+\textbf{2.2 The Arrival Process for Different Priorities}\\
+
+<< Arrival Process for Different Priorities>>=
+table2=as.data.frame(table(temp$vru_exit_int, temp$priority,temp$mon))
+names(table2)=c("time",'priority','mon','freq')
+mon_pri.xyplot = xyplot((freq/30) ~time|mon, groups=priority,data=table2,
+                        type="l",layout=c(3,4),
+                        ylab='Number of Calls per day',
+                        xlab='Time intervals per day',
+                        legend.plot=TRUE,outer=TRUE,
+                        col=c("blue", "red",'green'),
+                        key=list(text=list(c("Priority 0", 
+                                             "Priority 1","Priority 2")),
+                                 lines=list(col=c("blue", "red",'green')), columns=2))
+xlabpos <- seq(from=1, by=4, length=18)
+xlabs <- seq(from =7, by = 1,length =18)
+update(mon_pri.xyplot, scales=list(x=list(at=xlabpos, labels=xlabs)))
+@
+     
+     Generally speaking, there are two peaks for the priority 2 customers, at about 10 am and 16 pm respectively. And priority 2 accounts for the largest proportion of customers, while the proportion of priority 0 customers is decreasing with the proportion of priority 1 customers increasing, 
+
+\textbf{2.3 The Arrival Process for Different Types of Service}\\
+
+Since the majority of the services are PS(the largest proportion), NW, NE and IN, we will now show them separately with the data from December and November as example.
+
+<<Arrival Process for Different types of Service>>=
+temp2 = temp[which(temp$mon>=11),]
+table3 = as.data.frame(table(temp2$vru_exit_int,temp2$type))
+names(table3)=c("time",'type','freq')
+par(mfrow=c(1,2))
+temp1_temp = table3[which(table3$type =='PS'),]
+type1.xyplot = xyplot((freq/61) ~time, groups=type, 
+                      data=temp1_temp,type="l",
+                      ylab='Calls/Hr',xlab='Time(24 Hour Clock)',
+                      col=c("blue"),
+                      main='Arrivals(to queue or service)--- PS Call/Interval \n 
+                      by Time of Day')
+xlabpos <- seq(from=1, by=4, length=18)
+xlabs <- seq(from =7, by = 1,length =18)
+update(type1.xyplot, scales=list(x=list(at=xlabpos, labels=xlabs)))
+
+temp2_temp = table3[which(table3$type %in% c('NE','IN','NW')),]
+type2.xyplot = xyplot((freq/61) ~time, groups=type,data=temp2_temp,type="l",
+                      ylab='Calls/Hr',xlab='Time(24 Hour Clock)',
+                      legend.plot=TRUE,col=c("blue", "red",'green'),
+                      key=list(text=list(c("NW", "IN","NE")),
+                               lines=list(col=c("blue", "red",'green')), 
+                               columns=2),
+                      main=' Arrivals(to queue or service)--- 
+                      IN,NW and NE Call/Hour\n by Time of Day')
+xlabpos <- seq(from=1, by=4, length=18)
+xlabs <- seq(from =7, by = 1,length =18)
+update(type2.xyplot, scales=list(x=list(at=xlabpos, labels=xlabs)))
+@
+     
+     All these types of service's arrival process show some kind of bimodal pattern. The PS has two peaks around 10 am and 4 pm; the NE's peaks is around 10 am and 3 pm; the NW's peaks is around 9 am and 5 pm; the IN's peak is around 10 am and 10 pm.
+
+\textbf{2.4 Check whether the arrival process fits the Poisson Distribution}\\
+
+If it's Poisson distribution, then given a time interval across several days, the mean and standard deviation of the parameter of Poisson distribution should be 1. We can check this
+
+<<check Poisson Distribution of Arrival Process>>=
+attach(serv_data1)
+table4 = as.data.frame(table(vru_exit_int, weekday, mon, 
+type, priority))
+names(table4)=c('time','weekday','mon','type','priority','freq')
+summary(arrival.glm0 <- glm(
+formula = freq ~ time + weekday + mon + type + priority,
+family = quasipoisson, data = table4))
+detach(serv_data1)
+@
+
+Since the dispersion parameter for quasi-Poisson family taken to be 6.77315,which doesn't equal 1, it means the arrival process does not fit a Poisson Distribution. 
+I also did some other glm with subsets data divided by the month and priority and types, the results still show that the arrival process is not Poisson distributed.\\
+
+
+\textbf{3. The pattern of the number structure plot of daily number of calls}\\
+Since the operating time is different for Friday and Saturday, we will only consider the number of calls from Sunday to Thursday.
+
+\textbf{3.1 The Total Calls Per Day}
+
+<<Check the time series plot of daily number of calls>>=
+par(mfrow=c(1,1))
+ts.temp=as.data.frame(table(temp$date))
+names(ts.temp)=c('Date','Calls')
+ts.data=ts(ts.temp$Calls)
+plot(ts.data)
+@
+     
+     From the figure above, there seem to be some periodic trend.We will look into this trend. 
+
+<<Checking the lag plots of Calls>>=
+par(mfrow=c(3,2))
+lag.plot(ts.data, lags=6, do.lines=FALSE)
+par(mfrow=c(1,1))
+@
+     From the figures above, it seems like that except for lag 1, there is not a strong relationship between the data with 2 or more lags.Next, let's check the autocorrelation and partial autocorrelation.
+
+<<Checking the acf and pacf of Calls>>=
+par(mfrow=c(1,2))
+acf(ts.data)
+pacf(ts.data)
+par(mfrow=c(1,1))
+@
+
+From the acf figure, there are obvious linear association among observations seperated by 1 to 5 lags. But from the pcf figures, there is only obvious linear association among observations seperated by lag of 1 and by lags of 21. A possible explanation for this phenomenon is that since we only consider the days from Sunday to Thursday of each month, then the observations seperated by lags if 21 are actually the data from the same day in each month. For example, the first Monday in Jan may be linearly correlated with the first Monday in Feb.
+
+<<Checking the ar() model and arima or arma models>>=
+ar(ts.data, method='mle')
+library(forecast)
+auto.arima(ts.data)
+@
+The ar() function suggested an AR(5) process, while the auto.arima() suggest a Arima(1,0,2) process.
+
+\textbf{3.2 The total calls at each interval of a day}\\
+
+In order to see if there is any time series trend in the total calls at each interval of a day, we can choose several time intervals of a day and draw the acf and pacf of them.Since 10am and 16pm are the normal peaks during a day and I divide an hour into 4 intervals, I choose the time interval:40,41, 42,43, 60,61,62,63.\\
+
+<<The total calls at each interval of a days>>=
+ts.temp2=as.data.frame(table(temp$date,temp$vru_enter_int))
+names(ts.temp2)=c('Date','Interval',"Freq")
+par(mfrow=c(3,2))
+for(i in c(40,41,42,60,61,62)){
+ts.temp3=ts.temp2[which(ts.temp2$Interval==i),]
+acf(ts(ts.temp3$Freq))
+pacf(ts(ts.temp3$Freq))
+}
+par(mfrow=c(1,1))
+@
+
+As shown in the figures above, there is no obvious linear association.
+
+\textbf{3.3 Rolling Forecast}\\
+
+Since we discover that there is linear association among observations seperated by a lag of 21, we can use 20 days' data as a window to predict the data in 21.Then the prediction accuracy is calculated by (Actural num - Predicted num)/Actural Num.
+
+<<Rolling Forecast>>=
+#Using the dataset of daily number of calls---ts.temp
+num=dim(ts.temp)[1]-20
+accuracies = rep(0,num)
+for(i in 1:num){
+     dataset = ts.temp$Calls[i:i+19]
+     temp.arima=auto.arima(dataset)
+     fcast=forecast(temp.arima)
+     fdata = fcast[4]$mean[1]
+     accuracies[i]=(fdata - ts.temp[,2][i+20])/ts.temp[,2][i+20]
+}
+plot(density(accuracies),xlim=c(-2,5),
+     main='Density of Prediction Accuracies',
+     xlab = 'Prediction Accuracy')
+@
+     
+     
+\textbf{4. Customer Patience and Virtual Waiting Time}\\
+
+There is a distinction between the time that a customer needs to wait before reaching an agent and the time that a customer is willing to wait before abandoning the system. The former is referred to as virtual waiting time, while the latter is referred to as patience.
+Thus, to do the survival analysis of the waiting time, we need to create a censor variable for patience and virtual waiting time respectively. If the customer hangs up before being answered, then the virtual waiting time is right censored. If the customer get served, then the patience is right censored.
+
+\textbf{4.1 Creating Censor Variables}\\
+
+For the customer patience, the data is right censored when the customer gets served by an agent. So we create a censor variable for waiting patience which equals 1 if not censored and equals 0 if censored.
+For the virtual waiting time, the data is right censored when the customer hangs up. So we create a censor variable for virtual time which equals 1 if not censored and equals 0 if censored.
+
+<<censor data>>=
+serv_data1$censor_patience = 1
+serv_data1$censor_virtual_waiting = 1
+serv_data1$censor_patience[serv_data1$outcome == "AGENT"] = 0
+serv_data1$censor_virtual_waiting[serv_data1$outcome == "HANG"] = 0
+@
+     
+\textbf{4.2 Survival Function of Customer Patiene}\\
+
+Next, let's check the survival curves.First, let's consider the survival function of waiting patience for difference types of customers and different types of services.
+
+<<survival curves for waiting patience>>=
+library(survival)
+par(mfrow=c(1,2))
+plot(survfit(Surv(q_time, censor_patience)~priority, data=serv_data1),
+     col=c(2,4,6),xlab='Waiting time', 
+     ylab = 'Estimated Survival Probability',
+     main='Survival Curves of Waiting Patience\n 
+     for Different Type of Customer',
+     cex.main=0.8,cex.lab=0.8)
+legend('topright',legend=sort(unique(serv_data1$priority)),
+       lty=1,col=c(2,4,6),horiz=TRUE,cex=0.6)
+plot(survfit(Surv(q_time, censor_patience)~type, data=serv_data1),
+     col=c(2,5,8,11,14,17),xlab='Waiting time', 
+     ylab = 'Estimated Survival Probability',
+     main='Survival Curves of Waiting Patience\n for 
+     Different Type of Service',cex.main=0.8,cex.lab=0.8)
+legend('topright',legend=sort(unique(serv_data1$type)),
+       lty=1,col=c(2,5,8,11,14,17),cex=0.6)
+@
+     
+     As we can tell from the above figures, there are clear stochastic orderings. For example, type 2 customers are more patience than type 1 customer and much more patience than type 0 customers. From the aspect of service type, customers performing stock trading(type NE) are willing to wait more than customers calling for other services, such as regular services(type PS). It's quite possible that NE customers need the service more urgently. To summarize, there is a practical distinction between tolerance for waiting and loyalty/persistency.
+
+\textbf{4.4 Survival Function of Virtual Waiting Time}\\
+
+Second, let's consider the survival function of virtual waiting time for difference types of customers and different types of services.
+
+<<survival curves for virtual waiting time>>=
+plot(survfit(Surv(q_time ,censor_virtual_waiting)~priority, 
+                  data=serv_data1),col=c(2,4,6),
+          xlab='Waiting time', ylab = 'Estimated Survival Probability',
+          main='Survival Curves of Virtual Waiting time\n for 
+          Different Type of Customer',cex.main=0.8,cex.lab=0.8)
+legend('topright',legend=sort(unique(serv_data1$priority)),
+       lty=1,col=c(2,4,6))
+plot(survfit(Surv(q_time ,censor_virtual_waiting)~type, 
+             data=serv_data1),col=c(2,5,8,11,14,17),
+     xlab='Waiting time', 
+     ylab = 'Estimated Survival Probability',
+     main='Survival Curves of Virtual Waiting time
+     \n for Different Type of Customer', 
+     cex.main=0.8,cex.lab=0.8)
+legend('topright',legend=sort(unique(serv_data1$type)),
+       lty=1,col=c(2,5,8,11,14,17))
+@
+     
+     Although, the company intends to treat priority customers better by advancing their position in the queue with 1.5 minutes, there is not a practical big difference between the actual waiting time of those two types of customers. Also, the type 0 customers are not treated the same as the type 1 customers since type 0's waiting time is much longer.
+For different types of services, the virtual waiting time for type TT(customers who left a message asking the bank to return their call), type PS( regular activity) and type NE(stock exchange activity) is shorter than the other 3 types of service.\\
+
+\textbf{4.5 Hazard Rates}\\
+
+Here, we use the data in December and November as example to calculate the hazard rates for the customer patience.
+hazard rate = (S(T)- S(T+deltat))/S(T)*deltaT
+
+<<hazard rates of customer patience>>=
+temp.hz = serv_data1[which(serv_data1$mon >=11),]
+a = summary(survfit(Surv(temp.hz$q_time, temp.hz$censor_patience)~1))
+b = as.data.frame (cbind(time = a$time, s=a$surv,d=a$n.event, 
+n =a$n.risk))
+for(i in 1:250){
+b$haz[i] = ((b$s[i]-b$s[i+1]))/b$s[i]
+}
+for(i in 250:500){
+b$haz[i] = ((b$s[i]-b$s[i+4]))/(b$s[i]*(b$time[i+4]-b$time[i]))
+}
+plot(b[1:500,]$time,b[1:500,]$haz,type='l',
+main='Hazards Rates of Waiting Patience',
+xlab='Waiting Patience',cex.main=0.8)
+@
+
+The above figure plots the hazard rates of the time willing to wait. Note that it shows two main peaks. The first peak occurs after only a few seconds. The second peak occurs at about t = 60.
+
+Next, let's see the hazard rates for the virtual waiting time.
+
+<<hazard rates of virtual waiting time>>=
+a = summary(survfit(Surv(temp.hz$q_time, temp.hz$censor_virtual_waiting)~1))
+b = as.data.frame (cbind(time = a$time, s=a$surv,
+                         d=a$n.event, n =a$n.risk))
+for(i in 1:500){
+     b$haz[i] = ((b$s[i]-b$s[i+1]))/b$s[i]
+}
+for(i in 501:750){
+     b$haz[i] = ((b$s[i]-b$s[i+4]))/(b$s[i]*(b$time[i+4]-b$time[i]))
+}
+plot(b[1:750,]$time,b[1:750,]$haz,type='l',
+     main='Hazards Rates of \nVirtual Waiting Time',
+     xlab='Virtual Waiting Time',cex.main=0.8)
+@
+     
+     In the above figure, the hazard rate for the virtual waiting times is estimated for all calls. The overall plot reveals rather constant behavior.
+
+\textbf{4.5 The Cox proportional hazards model}\\
+
+In this part, we are going to check whether the hazards ratios are proportional among different types of priorities and different types of service.
+
+<< cox>>=
+serv_data1$type = relevel(serv_data1$type, ref="PS")
+patience.type.coxph = coxph(Surv(q_time, censor_patience) ~ type, 
+                            data=serv_data1)
+patience.pri.coxph = coxph(Surv(q_time, censor_patience) ~ priority, 
+                           data=serv_data1)
+summary(patience.type.coxph)
+summary(patience.pri.coxph)
+@
+     
+     As we can see from the above results, the hazard ratios are different among different type of services and are proportional. For example, the hazard ratio of NE is about 54\% of the hazard ratio of PS, which is consistent with the result shown in the survival function. The hazard ratios are also proportional among priorities.
+
+\textbf{5 Service Time}\\
+
+First, let's check the distribution of the service time from the aspect of different month, different weekday, different type and different priorities.
+We will use the data from November and December as example.
+
+<<5.1 Service time of different month for different priorities>>=
+#Use the dataset named temp created above
+library(lattice)
+
+bwplot(priority~log(ser_time)|mon, 
+data=temp[which(temp$mon %in% c(11,12)),],
+legend.plot=TRUE,
+xlab='Service time',
+main='Box Plot of Service time for \n
+Different Priorities in Nov.and Dec.'
+)
+densityplot(~log(ser_time)|mon, groups=priority,
+data=temp[which(temp$mon %in% c(11,12)),],
+auto.key=list(space='right'),
+xlab='Service time',
+main='Density Plot of Service time for \n 
+Different Priorities in Nov.and Dec.'
+)
+
+bwplot(type~log(ser_time)|mon,
+data=temp[which(temp$mon %in% c(11,12)),],
+auto.key=list(space='right'),
+xlab='Service time',
+main='Box Plot of Service time for \n
+Different Types of Service in Nov.and Dec.'
+)
+densityplot(~log(ser_time)|mon, groups=type,
+data=temp[which(temp$mon %in% c(11,12)),],
+auto.key=list(space='right'),
+xlab='Service time',
+main='Density Plot of Service time for \n
+Different Priorities in Nov.and Dec.'
+)
+@
+
+
+<<5.2 Service Time of Agents>>=
+densityplot(~log(ser_time)|server,groups=mon,
+data=temp[which(temp$mon %in% c(10,11,12)),],
+auto.key=list(space='right'),
+xlab='Service time',
+main='Density Plot of Service time for \n 
+Different Agents in Nov.and Dec.')
+@
+
+As we can tell from the above figure, the service time of most agents has the almost the same distribution among differetn months.
+
+\textbf{6.Classification}\\
+
+\textbf{6.1 Classification of Types of Service}\\
+
+There are 7 types of service, we will do the classification with variabls including vru_enter_int(the time that a customer calls),vru_time(the time a call spent in the vru line), priority(the types of customer), q_time(the waiting time in the queue).
+
+<<6.1 Classification of Types of Service>>=
+library(MASS)
+type.lda=lda(type~vru_enter_int+vru_time+priority+q_time+factor(weekday), data=temp,CV=TRUE)
+tab=table(temp$type, type.lda$class)
+err=1-(tab[1,1]+tab[2,2]+tab[3,3]+tab[4,4]+tab[5,5]+tab[6,6]+tab[7,7])/sum(tab)
+@
+
+The prediction error is 17.04\%.\\
+
+Let's try to do the classification with rpart() method.\\
+
+<<6.1.1 Classification of Types of Service with rpart()>>=
+set.seed(10001)
+printcp(rpart(type~vru_enter_int+vru_time+priority+q_time
+              +factor(weekday), data=temp,cp=0.00001))
+@
+
+When split=86, the cross-validation error is the smallest with 0.46137*0.32547=15.02\%. rpart() is a little better than lda().\\
+
+\textbf{6.2 Classification of Types of Customer}\\
+
+We will do the discrimination analysis of types of customer in the same way with variables including vru_enter_int, vru_time, q_time and weekday.\\
+
+<<6.2 Classification of Types of Customer>>=
+library(MASS)
+type.lda=lda(priority~vru_enter_int+vru_time+q_time+factor(weekday), 
+             data=temp,CV=TRUE)
+tab=table(temp$priority, type.lda$class)
+err=1-(tab[1,1]+tab[2,2]+tab[3,3])/sum(tab)
+@
+
+The prediction error with lda method is about 47.86\%, which is not good. Next, let's try the rpart method.\\
+
+<<6.2 rpart to classify types of customer>>=
+printcp(rpart(priority~vru_enter_int+vru_time+factor(weekday), 
+              cp=0.00001,data=temp))
+@
+
+When split is 72, we have the least cross validation error rate, which is 0.30431*0.65643=19.98\%. So in this case, rpart() is a better method than lda.\\
+
+
+\textbf{7 PrinCipal Component Analysis}\\
+
+\textbf{7.1 Principal Component Analysis of Arrival Process}\\
+
+\textbf{7.1.1 PCA of Arrival Pattern with the time intervals within a day}\\
+
+  Dividing a day into 48 intervals with 30 minutes per interval.Since the call center operates between 7:00 am and 12:00 pm, we only use the intervals from 15 to 48 for analysis.\\
+  
+  Since the data are counts of calls, before doing PCA, do the logarithm transformation of the data.\\
+  
+
+<<7.1.1 PCA of Arrival Process--summary>>=
+temp.arrival.interval = as.data.frame.matrix(
+     table(temp$date,temp$vru_enter_int))
+arrival.prc = princomp(log(temp.arrival.interval+1),cor=TRUE)
+summary(arrival.prc, digits=2)
+plot(arrival.prc$scores[,1],arrival.prc$scores[,2])
+@
+
+Based on the summary above, we need the first 18 PCs to account for at least 90\% of the variances.\\
+
+Also, from the scatter plot of PC1 vs PC2, there are some outliers, with extreme PC1 data or PC2 data. Let's find out the outliers and delete them.\\
+
+<<7.1.1 Find the outliers>>=
+sort(arrival.prc$scores[,1],decr=TRUE)[1:7]
+sort(arrival.prc$scores[,2],decr=TRUE)[1:7]
+@
+
+From the above results, we identify the following outliers: 990401,990407,990421, 990523,990912,990919, 990920.\\
+
+<<7.1.1 Redo the PCA of arrival process>>=
+temp.arr = temp[!temp$date%in%c("990401","990407","990421", 
+                                "990523","990912","990919", "990920"),]
+temp.arrival.interval = as.data.frame.matrix(
+     table(temp.arr$date,temp.arr$vru_exit_int))
+arrival.prc = princomp(log(temp.arrival.interval+1))
+summary(arrival.prc)
+@
+
+\textbf{7.1.2 Time Series Analysis of PCs}\\
+
+In this part, we are going to see if there is auto-correlation among the PCs.\\
+
+<<7.1.2 >>=
+plot(ts(arrival.prc$scores[,1]))
+abline(h=mean(arrival.prc$scores[,1]))
+plot(ts(arrival.prc$scores[,2]))
+abline(h=mean(arrival.prc$scores[,2]))
+plot(ts(arrival.prc$scores[,3]))
+abline(h=mean(arrival.prc$scores[,3]))
+acf(arrival.prc$scores[,1])
+acf(arrival.prc$scores[,2])
+acf(arrival.prc$scores[,3])
+@
+
+From the time series plot, there is mean reverting trend.Based on this, we do the prediction for the PCs.\\
+
+\textbf{7.1.3 Prediction of Total Number of Calls per day}\\
+
+Since we can use 18 PCs to account for 90\% of the variation of a day, we can try to fit a model to explore the relationship between the total number of the day with the 18 PCs.\\
+
+<<7.1.3 Prediction of Arrival Patterns PC>>=
+newdata = data.frame(y=apply(temp.arrival.interval,1,sum)
+     ,sc1 =arrival.prc$scores[,1],sc2=arrival.prc$scores[,2],
+      sc3 =arrival.prc$scores[,3],sc4=arrival.prc$scores[,4],
+      sc5 =arrival.prc$scores[,5],sc6=arrival.prc$scores[,6],
+      sc7 =arrival.prc$scores[,7],sc8=arrival.prc$scores[,8],
+      sc9 =arrival.prc$scores[,9],sc10=arrival.prc$scores[,10],
+      sc11 =arrival.prc$scores[,11],sc12=arrival.prc$scores[,12],
+      sc13 =arrival.prc$scores[,13],sc14=arrival.prc$scores[,14],
+      sc15 =arrival.prc$scores[,15],sc16=arrival.prc$scores[,16],
+      sc17 =arrival.prc$scores[,17],sc18=arrival.prc$scores[,18]
+                     )
+
+newdata.lm=lm(y~sc1+sc2+sc3+sc4+sc5+sc6+sc7+sc8+sc9
+                           +sc10+sc11+sc12+sc13+sc14+sc15+sc16+sc17+sc18,
+                           data=newdata)
+summary(newdata.lm)
+newdata.pred = fitted(newdata.lm)
+err.lm = (newdata$y - newdata.pred)/newdata$y
+
+newdata.glm=glm(y~sc1+sc2+sc3+sc4+sc5+sc6+sc7+sc8+sc9
+                           +sc10+sc11+sc12+sc13+sc14+sc15+sc16+sc17+sc18,
+                           family=quasipoisson,data=newdata)
+summary(newdata.glm)
+newdata.gpred = fitted(newdata.glm)
+err.glm = (newdata$y - newdata.gpred)/newdata$y
+
+summary(err.lm)
+summary(err.glm)
+@
+
+The glm() model performs better than the lm() model. If we can make precise prediction of the PCs, then we can make precise prediction on the total number of calls each day. So,the crucial part is making predictions for the PCs.\\
+
+\textbf{7.2 Principal Component Analysis of Customer Patience}\\
+
+\textbf{7.2.1 Survival Analysis of Customer Patience in each time interval}\\
+
+<<7.2 Survival Function>>=
+library(survival)
+plot(survfit(Surv(q_time, censor_patience)~vru_enter_int, 
+             data=serv_data1),
+     col=c(14:48),xlab='Waiting time', 
+     ylab = 'Estimated Survival Probability',
+     main='Survival Curves of Waiting Patience\n 
+     for Different Time Interval',
+     cex.main=0.8,cex.lab=0.8)
+@
+
+It's easy to see that for different time intervals, the survival function is quite different.\\
+
+\textbf{7.2.2 Hazard Rates of Customer Patience in each time interval}\\
+
+<<7.2.2 hazard rates of customer patience>>=
+time_patience=matrix(0,nrow=34,ncol=405)
+haz_patience=matrix(0,nrow=34,ncol=405)
+for(j in 1:34){
+     temp.hz = serv_data1[which(serv_data1$vru_enter_int==j+14),]
+     a1 = summary(survfit(Surv(temp.hz$q_time, temp.hz$censor_patience)~1))
+     b1 = as.data.frame (cbind(time = a1$time, s=a1$surv,d=a1$n.event, 
+                    n =a1$n.risk))
+     num = dim(b1)[1]
+
+     b1$haz=numeric(num)
+
+     for(i in 1:floor(num/2)){
+          b1$haz[i] = ((b1$s[i]-b1$s[i+1]))/b1$s[i]
+     }
+     for(i in (floor(num/2)+1) : (num-4)){
+          b1$haz[i] = ((b1$s[i]-b1$s[i+4]))/(b1$s[i]*(b1$time[i+4]-b1$time[i]))
+     }
+     
+     num = num - 4
+     time_patience[j,1:num] = b1$time[1:num]
+     haz_patience[j,1:num]=b1$haz[1:num]
+}
+par(mfrow=c(3,3))
+for(i in 1:34){
+     plot(time_patience[i,],haz_patience[i,],
+          main=paste('Hazard Ratios of time interval',i+14,
+                     "\nfor customer patience"),
+          type='l', cex.main = 0.8)
+}
+par(mfrow=c(1,1))  
+@
+
+\textbf{7.3 Principal Component Analysis of Waiting Time}\\
+
+\textbf{7.3.1 Survival Analysis of Waiting Time in each time interval}\\
+
+<<7.3.1 Survival Function>>=
+plot(survfit(Surv(q_time, censor_virtual_waiting)~vru_enter_int, 
+             data=serv_data1),
+     col=c(14:48),xlab='Waiting time', 
+     ylab = 'Estimated Survival Probability',
+     main='Survival Curves of Waiting Time\n 
+     for Different Time Interval',
+     cex.main=0.8,cex.lab=0.8)
+@
+
+It's easy to see that for different time intervals, the survival function is also quite different.\\
+
+\textbf{7.3.2 Hazard Rates of Customer Patience in each time interval}\\
+
+<<7.3.2 hazard rates of Waiting Time>>=
+time_waiting=matrix(0,nrow=34,ncol=700)
+haz_waiting=matrix(0,nrow=34,ncol=700)
+for(j in 1:34){
+     temp.hz = serv_data1[which(serv_data1$vru_enter_int==j+14),]
+     a1 = summary(survfit(Surv(temp.hz$q_time, 
+                               temp.hz$censor_virtual_waiting)~1))
+     b1 = as.data.frame (cbind(time = a1$time, s=a1$surv,d=a1$n.event, 
+                    n =a1$n.risk))
+     num = dim(b1)[1]
+     
+     b1$haz=numeric(num)
+
+     for(i in 1:floor(num/2)){
+          b1$haz[i] = ((b1$s[i]-b1$s[i+1]))/b1$s[i]
+     }
+     for(i in (floor(num/2)+1) : (num-4)){
+          b1$haz[i] = ((b1$s[i]-b1$s[i+4]))/(b1$s[i]*(b1$time[i+4]-b1$time[i]))
+     }
+     
+     num = num - 4
+     time_waiting[j,1:num] = b1$time[1:num]
+     haz_waiting[j,1:num]=b1$haz[1:num]
+}
+par(mfrow=c(3,3))
+for(i in 1:34){
+     plot(time_waiting[i,],haz_waiting[i,],
+          main=paste('Hazard Ratios of time interval',i+14,
+                     "\nfor waiting time"),
+          type='l', cex.main = 0.8)
+}
+par(mfrow=c(1,1))
+@
+
+
+\end{document}
